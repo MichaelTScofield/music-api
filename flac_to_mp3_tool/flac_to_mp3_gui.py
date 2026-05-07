@@ -495,6 +495,7 @@ class App:
 
         self.controller_thread: Optional[threading.Thread] = None
         self.executor: Optional[ThreadPoolExecutor] = None
+        self.is_converting = False
 
         self.total_tasks = 0
         self.done_tasks = 0
@@ -627,6 +628,7 @@ class App:
 
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
+        self.is_converting = True
 
         self._log(f"开始扫描：{input_dir}")
         self._log(f"输出目录：{output_dir}")
@@ -734,6 +736,7 @@ class App:
     def _on_finished(self) -> None:
         self.stop_btn.configure(state=tk.DISABLED)
         self.start_btn.configure(state=tk.NORMAL)
+        self.is_converting = False
 
         if self.stop_event.is_set():
             self._log(f"已停止：完成 {self.done_tasks}/{self.total_tasks}，失败 {self.fail_tasks}。")
@@ -757,6 +760,14 @@ class App:
             self._log(f"完成：共 {self.total_tasks}，失败 {self.fail_tasks}。")
 
     def on_close(self) -> None:
+        if self.is_converting:
+            should_close = messagebox.askyesno(
+                "\u6b63\u5728\u8f6c\u6362",
+                "\u6b4c\u66f2\u6b63\u5728\u8f6c\u6362\u4e2d\uff0c\u5173\u95ed\u7a97\u53e3\u4f1a\u505c\u6b62\u5f53\u524d\u8f6c\u6362\u4efb\u52a1\u3002\n\n\u786e\u5b9a\u8981\u5173\u95ed\u5417\uff1f",
+            )
+            if not should_close:
+                return
+
         # 关闭窗口时，确保不会遗留 ffmpeg 进程
         try:
             self.stop_event.set()
