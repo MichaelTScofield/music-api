@@ -10,9 +10,17 @@ lerna-debug.log*
 node_modules
 .DS_Store
 dist
+build
 dist-ssr
 coverage
 *.local
+*.tgz
+*.whl
+**/qq_music_cookie.txt
+**/qq_music_login_profile/
+**/tmp_qqmusicapi_src/
+runtime/
+__pycache__/
 
 /cypress/videos/
 /cypress/screenshots/
