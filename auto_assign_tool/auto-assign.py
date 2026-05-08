@@ -41,7 +41,7 @@ from service_manager import MusicApiServiceManager
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
 LOCAL_API = "http://127.0.0.1:3001"
-# 专辑元数据优先使用 QQ 音乐；本地未匹配到的专辑再用 music-api（网易云）补充。
+# 专辑元数据会同时读取 QQ 音乐与 music-api（网易云），优先使用专辑数量更多的平台匹配。
 # 本地 music-api 见 _default_timeout_for_url
 REQUEST_TIMEOUT = int(os.environ.get("AUTO_ASSIGN_HTTP_TIMEOUT", "30"))
 REPORT_FILE_SUFFIX = "专辑缺失报告.txt"
@@ -117,6 +117,11 @@ TRADITIONAL_TO_SIMPLIFIED_FALLBACK = str.maketrans(
     }
 )
 
+class AlbumMetadataDict(dict):
+    def __init__(self, *args, source_summary=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.source_summary = source_summary or {}
+
 # -----------------------
 # 工具函数
 # -----------------------
@@ -184,6 +189,11 @@ def normalize_track_title_key(name: str) -> str:
     name = normalize_cjk_text(clean_song_name(name))
     return re.sub(r"\s+", " ", name).strip().lower()
 
+def strip_windows_duplicate_suffix(title: str) -> str:
+    """去掉本地文件重名产生的末尾 (2)/(3)，不把它当作曲目版本。"""
+    text = clean_song_name(title)
+    return re.sub(r"\s*[\(（][2-9]\d{0,2}[\)）]\s*$", "", text).strip()
+
 def strip_leading_artist_from_title(title: str) -> str:
     """去掉常见「歌手 - 曲名」前缀，用于本地标题/文件名包含歌手名时匹配远端曲目表。"""
     text = clean_song_name(title)
@@ -194,15 +204,31 @@ def strip_leading_artist_from_title(title: str) -> str:
         return parts[1].strip()
     return text
 
+def iter_track_title_candidates(title: str):
+    seen = set()
+    base = clean_song_name(title)
+    without_duplicate = strip_windows_duplicate_suffix(base)
+    for candidate in (
+        base,
+        without_duplicate,
+        strip_leading_artist_from_title(base),
+        strip_leading_artist_from_title(without_duplicate),
+    ):
+        candidate = clean_song_name(candidate)
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
 def iter_track_match_keys(title: str):
     seen = set()
-    candidates = [title, strip_leading_artist_from_title(title)]
-    for candidate in candidates:
-        for key in (
-            normalize_track_title_key(candidate),
-            normalize_track_variant_key(candidate),
-            normalize_song_name(candidate),
-        ):
+    candidates = list(iter_track_title_candidates(title))
+    for normalizer in (
+        normalize_track_title_key,
+        normalize_track_variant_key,
+        normalize_song_name,
+    ):
+        for candidate in candidates:
+            key = normalizer(candidate)
             if key and key not in seen:
                 seen.add(key)
                 yield key
@@ -940,7 +966,7 @@ def load_qq_auto_assign_module():
 
     helper_path = resolve_bundled_file("qq-auto-assign.py")
     if not helper_path:
-        raise FileNotFoundError("未找到 qq-auto-assign.py，无法优先查询 QQ 音乐专辑信息。")
+        raise FileNotFoundError("未找到 qq-auto-assign.py，无法查询 QQ 音乐专辑信息。")
 
     spec = importlib.util.spec_from_file_location("qq_auto_assign_metadata_provider", helper_path)
     module = importlib.util.module_from_spec(spec)
@@ -972,7 +998,7 @@ def find_unmatched_local_album_names(album_metadata, local_album_names):
             unmatched.append(album_name)
     return unmatched
 
-def find_local_album_names_needing_netease(album_metadata, local_album_names):
+def find_local_album_names_needing_secondary(album_metadata, local_album_names):
     needs = []
     seen = set()
     for album_name in normalize_local_album_names(local_album_names):
@@ -987,6 +1013,9 @@ def find_local_album_names_needing_netease(album_metadata, local_album_names):
         if not any(get_publish_date_rank(item.get("publish_date", "")) > 0 for _, item in candidates):
             needs.append(album_name)
     return needs
+
+def find_local_album_names_needing_netease(album_metadata, local_album_names):
+    return find_local_album_names_needing_secondary(album_metadata, local_album_names)
 
 def filter_album_metadata_by_album_names(album_metadata, album_names):
     wanted_keys = {normalize_album_name(name) for name in normalize_local_album_names(album_names)}
@@ -1071,15 +1100,34 @@ def resolve_album_metadata_entry(
     metadata = merge_album_metadata_candidates([(chosen[0], chosen[1])], album_name)
     return chosen[0], preserve_local_publish_date(metadata, release_hint)
 
+def choose_album_metadata_primary_source(qq_album_count: int, netease_album_count: int) -> str:
+    if netease_album_count > qq_album_count:
+        return "netease"
+    return "qq"
+
+def build_album_metadata_source_summary(primary_key: str, qq_count: int, netease_count: int) -> dict:
+    if primary_key == "netease":
+        return {
+            "primary": "网易云",
+            "secondary": "QQ 音乐",
+            "qq_count": qq_count,
+            "netease_count": netease_count,
+        }
+    return {
+        "primary": "QQ 音乐",
+        "secondary": "网易云",
+        "qq_count": qq_count,
+        "netease_count": netease_count,
+    }
+
 def fetch_album_metadata(artist_name: str, local_album_names=None, log_func=None):
     qq_metadata = {}
     netease_metadata = {}
-    merged_metadata = {}
     local_album_names = normalize_local_album_names(local_album_names)
 
     try:
         if log_func:
-            log_func("正在优先拉取 QQ 音乐数据（歌手专辑较多时可能需要一些时间）…")
+            log_func("正在拉取 QQ 音乐数据（歌手专辑较多时可能需要一些时间）…")
         qq_metadata = fetch_qq_album_metadata(artist_name, log_func=log_func)
     except Exception as exc:
         if log_func:
@@ -1088,58 +1136,84 @@ def fetch_album_metadata(artist_name: str, local_album_names=None, log_func=None
                 extra = " [可设置环境变量 QQ_AUTO_ASSIGN_HTTP_TIMEOUT=60 延长 QQ 音乐接口超时]"
             log_func(f"QQ 音乐专辑元数据获取失败：{exc}{extra}")
 
-    merged_metadata.update(qq_metadata)
-    unmatched_album_names = find_unmatched_local_album_names(qq_metadata, local_album_names)
-    netease_album_names = find_local_album_names_needing_netease(qq_metadata, local_album_names)
-    should_fetch_netease = bool(netease_album_names) or (not local_album_names and not qq_metadata)
+    service_manager = MusicApiServiceManager(
+        base_dir=os.path.dirname(os.path.abspath(__file__)),
+        log_callback=log_func,
+    )
+    try:
+        service_manager.ensure_running(timeout_seconds=60)
+        time.sleep(1.5)
+        if log_func:
+            log_func("正在拉取网易云数据，用于比较两个平台的专辑数量…")
+        netease_metadata = fetch_netease_album_metadata(artist_name, log_func=log_func)
+    except Exception as exc:
+        if log_func:
+            extra = ""
+            if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
+                extra = " [可设置环境变量 AUTO_ASSIGN_LOCAL_READ_TIMEOUT=180 延长本地读超时，或稍后再试]"
+            log_func(f"网易云专辑元数据获取失败：{exc}{extra}")
+    finally:
+        service_manager.stop()
+
+    sources = [
+        {"key": "qq", "label": "QQ 音乐", "metadata": qq_metadata},
+        {"key": "netease", "label": "网易云", "metadata": netease_metadata},
+    ]
+    primary_key = choose_album_metadata_primary_source(len(qq_metadata), len(netease_metadata))
+    primary_source = next(source for source in sources if source["key"] == primary_key)
+    secondary_source = next(source for source in sources if source["key"] != primary_key)
+    source_summary = build_album_metadata_source_summary(
+        primary_key,
+        len(qq_metadata),
+        len(netease_metadata),
+    )
+
+    primary_metadata = primary_source["metadata"]
+    secondary_metadata = secondary_source["metadata"]
+    merged_metadata = AlbumMetadataDict(source_summary=source_summary)
+    merged_metadata.update(primary_metadata)
+
+    if log_func:
+        log_func(
+            f"平台专辑数量对比：QQ 音乐 {len(qq_metadata)} 条，"
+            f"网易云 {len(netease_metadata)} 条，优先使用 {primary_source['label']}。"
+        )
+
+    unmatched_album_names = find_unmatched_local_album_names(primary_metadata, local_album_names)
+    secondary_album_names = find_local_album_names_needing_secondary(primary_metadata, local_album_names)
 
     if log_func and local_album_names:
         matched_count = len(local_album_names) - len(unmatched_album_names)
         log_func(
-            f"QQ 音乐本地专辑匹配：已匹配 {matched_count} 张，"
+            f"{primary_source['label']}本地专辑匹配：已匹配 {matched_count} 张，"
             f"未匹配 {len(unmatched_album_names)} 张。"
         )
 
-    if should_fetch_netease:
-        service_manager = MusicApiServiceManager(
-            base_dir=os.path.dirname(os.path.abspath(__file__)),
-            log_callback=log_func,
+    if secondary_album_names:
+        if log_func:
+            preview = "、".join(secondary_album_names[:8])
+            if len(secondary_album_names) > 8:
+                preview += f" 等 {len(secondary_album_names)} 张"
+            log_func(
+                f"正在用{secondary_source['label']}补充"
+                f"{primary_source['label']}未匹配或日期未知专辑：{preview}"
+            )
+        secondary_metadata = filter_album_metadata_by_album_names(
+            secondary_metadata,
+            secondary_album_names,
         )
-        try:
-            service_manager.ensure_running(timeout_seconds=60)
-            time.sleep(1.5)
-            if log_func:
-                if netease_album_names:
-                    preview = "、".join(netease_album_names[:8])
-                    if len(netease_album_names) > 8:
-                        preview += f" 等 {len(netease_album_names)} 张"
-                    log_func(f"正在用网易云补查 QQ 未匹配或日期未知专辑：{preview}")
-                else:
-                    log_func("QQ 音乐未加载到可用专辑数据，正在拉取网易云数据…")
-            netease_metadata = fetch_netease_album_metadata(artist_name, log_func=log_func)
-            if netease_album_names:
-                netease_metadata = filter_album_metadata_by_album_names(
-                    netease_metadata,
-                    netease_album_names,
-                )
-        except Exception as exc:
-            if log_func:
-                extra = ""
-                if "timed out" in str(exc).lower() or "timeout" in str(exc).lower():
-                    extra = " [可设置环境变量 AUTO_ASSIGN_LOCAL_READ_TIMEOUT=180 延长本地读超时，或稍后再试]"
-                log_func(f"网易云专辑元数据获取失败：{exc}{extra}")
-        finally:
-            service_manager.stop()
-
-        # 直接并入网易云补充条目（每专辑唯一 key），避免同名不同 ID 被提前合并。
-        merged_metadata.update(netease_metadata)
-    elif log_func:
-        log_func("本地专辑均已在 QQ 音乐匹配，跳过网易云补查。")
+        # 直接并入补充条目（每专辑唯一 key），避免同名不同 ID 被提前合并。
+        merged_metadata.update(secondary_metadata)
+    elif log_func and local_album_names:
+        log_func(
+            f"本地专辑均已在{primary_source['label']}匹配且日期可用，"
+            f"无需使用{secondary_source['label']}补充。"
+        )
 
     if log_func:
         log_func(
             f"本次已加载专辑元数据：QQ 音乐 {len(qq_metadata)} 条，"
-            f"网易云补充 {len(netease_metadata)} 条，合计 {len(merged_metadata)} 条。"
+            f"网易云 {len(netease_metadata)} 条，实际用于匹配 {len(merged_metadata)} 条。"
         )
     return merged_metadata
 
@@ -1450,7 +1524,7 @@ def collect_local_track_match_key_sets(folder_path: str) -> tuple[set, set]:
         if not os.path.isfile(path) or not is_audio_file(path):
             continue
         title = get_track_title(path) or os.path.splitext(strip_track_prefix(fname))[0]
-        for candidate in (title, strip_leading_artist_from_title(title)):
+        for candidate in iter_track_title_candidates(title):
             ks = normalize_track_title_key(candidate)
             kl = normalize_song_name(candidate)
             if ks:
@@ -1459,13 +1533,13 @@ def collect_local_track_match_key_sets(folder_path: str) -> tuple[set, set]:
                 loose_keys.add(kl)
     return strict_keys, loose_keys
 
-
 def list_netease_tracks_missing_locally(folder_path: str, track_titles) -> list:
     """根据网易云曲目表，列出本地文件夹中未匹配到的曲名（用于报告）。"""
     if not track_titles:
         return []
     local_strict, local_loose = collect_local_track_match_key_sets(folder_path)
-    missing = []
+    remote_loose_counts = {}
+    normalized_titles = []
     for item in track_titles:
         if isinstance(item, dict):
             title = item.get("title", "")
@@ -1474,11 +1548,18 @@ def list_netease_tracks_missing_locally(folder_path: str, track_titles) -> list:
         title = clean_song_name(str(title or ""))
         if not title:
             continue
+        normalized_titles.append(title)
+        kl = normalize_song_name(title)
+        if kl:
+            remote_loose_counts[kl] = remote_loose_counts.get(kl, 0) + 1
+
+    missing = []
+    for title in normalized_titles:
         ks = normalize_track_title_key(title)
         kl = normalize_song_name(title)
         if ks and ks in local_strict:
             continue
-        if kl and kl in local_loose:
+        if kl and remote_loose_counts.get(kl, 0) == 1 and kl in local_loose:
             continue
         missing.append(title)
     return missing
@@ -1670,7 +1751,33 @@ def verify_album_counts(album_folders, album_metadata, log_func=None, artist_fol
         "skipped": skipped,
         "mismatched_items": mismatched_items,
         "missing_album_items": missing_album_items,
+        "metadata_source_summary": dict(getattr(album_metadata, "source_summary", {}) or {}),
     }
+
+def build_metadata_source_report_line(verification_result) -> str:
+    summary = (verification_result or {}).get("metadata_source_summary") or {}
+    primary = (summary.get("primary") or "").strip()
+    secondary = (summary.get("secondary") or "").strip()
+    qq_count = summary.get("qq_count")
+    netease_count = summary.get("netease_count")
+    if primary and secondary:
+        count_text = ""
+        if qq_count is not None and netease_count is not None:
+            count_text = f"（QQ 音乐 {qq_count} 条，网易云 {netease_count} 条）"
+        return f"数据源：{primary}优先，{secondary}补充{count_text}"
+
+    sources = []
+    for item in (verification_result or {}).get("mismatched_items", []) or []:
+        for source in item.get("sources") or []:
+            if source and source not in sources:
+                sources.append(str(source))
+    for item in (verification_result or {}).get("missing_album_items", []) or []:
+        for source in item.get("sources") or []:
+            if source and source not in sources:
+                sources.append(str(source))
+    if sources:
+        return "数据源：" + "、".join(sources)
+    return "数据源：未获取到远端专辑元数据"
 
 def write_album_mismatch_report(dest_folder: str, artist_name: str, verification_result, log_func=None):
     report_path = get_report_path(artist_name)
@@ -1678,7 +1785,7 @@ def write_album_mismatch_report(dest_folder: str, artist_name: str, verification
     missing_albums = verification_result.get("missing_album_items", []) if verification_result else []
     lines = [
         f"歌手：{artist_name}",
-        "数据源：QQ 音乐优先，未匹配时网易云补充",
+        build_metadata_source_report_line(verification_result),
         f"更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
     ]
