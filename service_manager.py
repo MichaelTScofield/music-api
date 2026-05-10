@@ -43,6 +43,58 @@ class MusicApiServiceManager:
                 return root
         return self.base_dir
 
+    @staticmethod
+    def _node_path_rank(path_str):
+        """用于排序：优先官方 Node.js 安装路径，降级 IDE 自带的 node.exe。"""
+        lower = os.path.normpath(path_str).lower()
+        score = 0
+        if "cursor" in lower.replace("\\", "/"):
+            score += 80
+        if "vscode" in lower or "\\code\\resources\\" in lower or "visual studio code" in lower:
+            score += 80
+        if "nodejs" in lower:
+            score -= 40
+        return (score, lower)
+
+    def _discover_system_node_executables(self):
+        paths = []
+        seen = set()
+
+        def add(candidate):
+            if not candidate:
+                return
+            path = os.path.normpath(candidate.strip().strip('"'))
+            if not os.path.isfile(path):
+                return
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                return
+            seen.add(key)
+            paths.append(path)
+
+        add(os.environ.get("MUSIC_API_NODE", ""))
+
+        which_node = shutil.which("node")
+        if which_node:
+            add(which_node)
+
+        if os.name == "nt":
+            try:
+                completed = subprocess.run(
+                    ["where.exe", "node"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                for line in (completed.stdout or "").splitlines():
+                    add(line)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+        paths.sort(key=self._node_path_rank)
+        return paths
+
     def _is_port_open(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(1)
@@ -76,13 +128,13 @@ class MusicApiServiceManager:
                 "cwd": str(self.service_root),
             }
 
-        local_node = shutil.which("node")
-        if local_node and app_js.exists():
-            yield {
-                "label": "系统Node",
-                "command": [local_node, str(app_js)],
-                "cwd": str(self.service_root),
-            }
+        for local_node in self._discover_system_node_executables():
+            if app_js.exists():
+                yield {
+                    "label": f"系统Node ({local_node})",
+                    "command": [local_node, str(app_js)],
+                    "cwd": str(self.service_root),
+                }
 
     def ensure_running(self, timeout_seconds=30):
         # 仅当 /hello 可用时视为已就绪；端口被占用但无健康响应时仍尝试启动（便于暴露端口冲突）
@@ -129,7 +181,7 @@ class MusicApiServiceManager:
             "请确认已准备以下任一方案：\n"
             "1. runtime/music-api-service.exe\n"
             "2. runtime/node/node.exe + runtime/music-api/app.js\n"
-            "3. 本机 PATH 中可用的 node.exe\n\n"
+            "3. 本机 PATH 中可用的 node.exe（或设置环境变量 MUSIC_API_NODE 指向 node.exe 绝对路径）\n\n"
             + "\n".join(startup_errors)
         )
 

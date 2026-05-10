@@ -198,26 +198,25 @@ const constructServer = async (moduleDefs) => {
 }
 const apiServe = async (options = {}) => {
   const port = Number(options.port || process.env.PORT || '3001')
-  const host = options.host || process.env.HOST || ''
+  const host = (options.host || process.env.HOST || '').trim()
 
-  const checkVersionSubmission = checkVersion().then(
-    ({ status, curVersion, latestVersion }) => {
-      if (status == VERSION_CHECK_RESULT.NOT_LATEST) {
-        // console.log(`最新版本: ${latestVersion}, 当前版本: ${curVersion}, 请及时更新`);
-      }
-    },
-  )
-  const constructServerSubmission = constructServer(options.moduleDefs)
+  const app = await constructServer(options.moduleDefs)
 
-  const [_, app] = await Promise.all([
-    checkVersionSubmission,
-    constructServerSubmission,
-  ])
+  // 版本检查走网络/子进程，勿阻塞 listen；否则 GUI 健康检查易超时（尤其 npm/registry 慢或不可达时）
+  void checkVersion().then(({ status, curVersion, latestVersion }) => {
+    if (status == VERSION_CHECK_RESULT.NOT_LATEST) {
+      // console.log(`最新版本: ${latestVersion}, 当前版本: ${curVersion}, 请及时更新`);
+    }
+  })
 
   const appExt = app
-  appExt.server = app.listen(port, host, () => {
-    console.log(`server running @ http://${host ? host : 'localhost'}:${port}`)
-  })
+  const onListen = () => {
+    const shownHost = host || 'localhost'
+    console.log(`server running @ http://${shownHost}:${port}`)
+  }
+  appExt.server = host
+    ? app.listen(port, host, onListen)
+    : app.listen(port, onListen)
 
   // use to test
   return appExt

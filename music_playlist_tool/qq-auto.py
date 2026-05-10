@@ -302,6 +302,10 @@ def qq_musicu_api_request(
     ret_code = data.get("retCode") if isinstance(data, dict) else None
     ret_code_value = to_int(ret_code, ret_code) if ret_code is not None else None
     if code_value not in (None, 0):
+        if code_value == 1000:
+            raise CookieExpiredError(
+                "QQ 音乐登录态失效（musicu code=1000），请先运行：python qq-auto.py --refresh-cookie"
+            )
         raise ValueError(f"{action}失败：module={module}, method={method}, response={item}")
     allowed = {0} if allowed_ret_codes is None else set(allowed_ret_codes)
     if ret_code_value is not None and ret_code_value not in allowed:
@@ -753,8 +757,10 @@ def response_indicates_cookie_expired(response):
         return True
     if any(status_is(value, {403}) for value in status_values):
         return any(keyword in message for keyword in ["登录", "登陆", "cookie", "auth", "token", "未登录", "未登陆"])
-    if any(status_is(value, {1000}) for value in status_values) and any(keyword in message for keyword in ["登录", "登陆", "cookie", "auth", "token"]):
-        return True
+    # musicu/部分接口仅以 code=1000、且无 message 字段表示会话失效或未登录
+    if any(status_is(value, {1000}) for value in status_values):
+        auth_hints = ["登录", "登陆", "cookie", "auth", "token", "未登录", "未登陆"]
+        return (not message.strip()) or any(keyword in message for keyword in auth_hints)
     keywords = ["登录", "登陆", "失效", "过期", "cookie", "先登录", "未登陆", "未登录"]
     return any(keyword in message for keyword in keywords)
 

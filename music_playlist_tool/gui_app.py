@@ -416,7 +416,7 @@ class PlaylistGui:
         )
         try:
             if auto_create or execute_netease:
-                service_manager.ensure_running()
+                service_manager.ensure_running(timeout_seconds=60)
             result = WORKFLOW.run_workflow(
                 artist_name,
                 execute_netease=execute_netease,
