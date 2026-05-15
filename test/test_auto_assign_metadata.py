@@ -8,10 +8,19 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 AUTO_ASSIGN_PATH = ROOT / "auto_assign_tool" / "auto-assign.py"
+QQ_AUTO_ASSIGN_PATH = ROOT / "auto_assign_tool" / "qq-auto-assign.py"
 
 
 def load_auto_assign_module():
     spec = importlib.util.spec_from_file_location("auto_assign_under_test", AUTO_ASSIGN_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_qq_auto_assign_module():
+    spec = importlib.util.spec_from_file_location("qq_auto_assign_under_test", QQ_AUTO_ASSIGN_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -138,6 +147,155 @@ class FetchAlbumMetadataPriorityTest(unittest.TestCase):
             )
 
         self.assertEqual(["爱怎么回不来"], missing)
+
+    def test_missing_report_counts_duplicate_remote_titles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "03. 第三街 (快版).flac").write_bytes(b"")
+
+            missing = self.module.list_netease_tracks_missing_locally(
+                temp_dir,
+                [
+                    {"title": "第三街 (快版)", "track_no": 3},
+                    {"title": "第三街 (快版)", "track_no": 4},
+                    {"title": "第三街 (慢版)", "track_no": 18},
+                ],
+            )
+
+        self.assertEqual(["第三街 (快版)", "第三街 (慢版)"], missing)
+
+    def test_missing_report_labels_duplicate_remote_titles_with_duration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "11. BEYOND - 过去与今天.flac").write_bytes(b"")
+
+            missing = self.module.list_netease_tracks_missing_locally(
+                temp_dir,
+                [
+                    {"title": "过去与今天", "track_no": 11, "duration": 253},
+                    {"title": "过去与今天", "track_no": 19, "duration": 296},
+                ],
+            )
+
+        self.assertEqual(["过去与今天 [04:56]"], missing)
+
+    def test_live_variant_does_not_take_plain_duplicate_track_number(self):
+        track_index_map, _ = self.module.build_track_index_map(
+            [
+                {"title": "过去与今天 (Live In Hong Kong)", "track_no": 10},
+                {"title": "过去与今天", "track_no": 11},
+                {"title": "过去与今天", "track_no": 19},
+            ]
+        )
+
+        live_key = self.module.resolve_track_match_key(
+            "BEYOND - 过去与今天 (Live In Hong Kong)",
+            track_index_map,
+        )
+        plain_key = self.module.resolve_track_match_key(
+            "BEYOND - 过去与今天",
+            track_index_map,
+        )
+
+        self.assertEqual([10], track_index_map[live_key])
+        self.assertEqual([11, 19], track_index_map[plain_key])
+
+    def test_report_groups_repeated_missing_titles(self):
+        verification_result = {
+            "mismatched_items": [
+                {
+                    "album_name": "Soundtrack",
+                    "actual_count": 21,
+                    "expected_count": 23,
+                    "sources": ["QQ音乐"],
+                    "missing_titles": [
+                        "主题曲",
+                        "第三街",
+                        "第三街",
+                        "第三街",
+                        "第三街",
+                        "主题曲",
+                        "主题曲",
+                    ],
+                }
+            ],
+            "missing_album_items": [],
+            "metadata_source_summary": {},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.txt"
+            with patch.object(self.module, "get_report_path", return_value=str(report_path)):
+                self.module.write_album_mismatch_report(temp_dir, "Beyond", verification_result)
+
+            content = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("缺：主题曲 x3；第三街 x4", content)
+        self.assertNotIn("第三街；第三街", content)
+
+
+class QQAlbumMetadataTest(unittest.TestCase):
+    def setUp(self):
+        self.module = load_qq_auto_assign_module()
+
+    def test_qq_song_title_prefers_specific_display_title(self):
+        title = self.module.extract_qq_song_title(
+            {
+                "songInfo": {
+                    "name": "第三街",
+                    "title": "第三街 (快版)",
+                }
+            }
+        )
+
+        self.assertEqual("第三街 (快版)", title)
+
+    def test_qq_song_title_appends_subtitle_when_title_is_not_specific(self):
+        title = self.module.extract_qq_song_title(
+            {
+                "songInfo": {
+                    "name": "旧日的足迹",
+                    "title": "旧日的足迹",
+                    "subtitle": "Live",
+                }
+            }
+        )
+
+        self.assertEqual("旧日的足迹 (Live)", title)
+
+    def test_qq_song_title_does_not_repeat_existing_subtitle(self):
+        title = self.module.extract_qq_song_title(
+            {
+                "songInfo": {
+                    "name": "旧日的足迹",
+                    "title": "旧日的足迹 (Live In Hong Kong)",
+                    "subtitle": "Live In Hong Kong",
+                }
+            }
+        )
+
+        self.assertEqual("旧日的足迹 (Live In Hong Kong)", title)
+
+    def test_qq_report_groups_repeated_missing_titles(self):
+        verification_result = {
+            "mismatched_items": [
+                {
+                    "album_name": "Soundtrack",
+                    "actual_count": 21,
+                    "expected_count": 23,
+                    "missing_titles": ["第三街 (快版)", "第三街 (快版)", "第三街 (慢版)"],
+                }
+            ],
+            "missing_album_items": [],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.txt"
+            with patch.object(self.module.base, "get_report_path", return_value=str(report_path)):
+                self.module.write_album_mismatch_report(temp_dir, "Beyond", verification_result)
+
+            content = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("缺：第三街 (快版) x2；第三街 (慢版)", content)
+        self.assertNotIn("第三街 (快版)；第三街 (快版)", content)
 
 
 if __name__ == "__main__":

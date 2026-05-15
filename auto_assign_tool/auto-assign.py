@@ -37,6 +37,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from service_manager import MusicApiServiceManager
+from single_instance import SingleInstance
 
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
@@ -47,6 +48,8 @@ REQUEST_TIMEOUT = int(os.environ.get("AUTO_ASSIGN_HTTP_TIMEOUT", "30"))
 REPORT_FILE_SUFFIX = "专辑缺失报告.txt"
 SETTINGS_FILE_NAME = "auto_assign_settings.json"
 QQ_AUTO_ASSIGN_MODULE = None
+SINGLE_INSTANCE_APP_ID = "music-api-auto-assign"
+SINGLE_INSTANCE_PORT = 49231
 AUDIO_EXTENSIONS = {
     ".mp3",
     ".flac",
@@ -158,6 +161,23 @@ def normalize_album_name(name: str) -> str:
 
 def clean_song_name(name: str) -> str:
     return re.sub(r"\s+", " ", (name or "")).strip()
+
+def normalize_track_duration_seconds(value) -> int:
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    if seconds > 10000:
+        seconds = seconds / 1000
+    return int(round(seconds))
+
+def format_track_duration(value) -> str:
+    seconds = normalize_track_duration_seconds(value)
+    if seconds <= 0:
+        return ""
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 def normalize_song_name(name: str) -> str:
     """宽松曲名：去掉括号内容，用于与「无括号」标题对齐；多首同名加括号后缀时不可用。"""
@@ -854,6 +874,7 @@ def fetch_netease_album_detail(album_id: int, artist_name: str = "") -> dict:
             {
                 "title": title,
                 "track_no": index,
+                "duration": normalize_track_duration_seconds(song.get("dt", 0)),
                 "artists": artist_names,
             }
         )
@@ -1224,6 +1245,8 @@ def build_track_index_map(track_titles):
     track_index_map = {}
     loose_candidates = {}
     max_track_no = 0
+    normalized_tracks = []
+    strict_keys = set()
 
     def add_key(target_map, key, track_no):
         if not key:
@@ -1243,12 +1266,18 @@ def build_track_index_map(track_titles):
         if not strict_key:
             continue
         add_key(track_index_map, strict_key, track_no)
-        add_key(track_index_map, normalize_track_variant_key(title), track_no)
-        loose_key = normalize_song_name(title)
-        if loose_key and loose_key != strict_key:
-            add_key(loose_candidates, loose_key, track_no)
+        strict_keys.add(strict_key)
+        normalized_tracks.append((title, track_no, strict_key))
         if track_no > max_track_no:
             max_track_no = track_no
+
+    for title, track_no, strict_key in normalized_tracks:
+        variant_key = normalize_track_variant_key(title)
+        if variant_key and (variant_key == strict_key or variant_key not in strict_keys):
+            add_key(track_index_map, variant_key, track_no)
+        loose_key = normalize_song_name(title)
+        if loose_key and loose_key != strict_key and loose_key not in strict_keys:
+            add_key(loose_candidates, loose_key, track_no)
 
     for key, track_numbers in loose_candidates.items():
         if key not in track_index_map and len(track_numbers) == 1:
@@ -1515,10 +1544,10 @@ def collect_existing_album_folders(dest_folder: str, album_metadata, album_folde
 
     return collected
 
-def collect_local_track_match_key_sets(folder_path: str) -> tuple[set, set]:
-    """每首本地曲目的严格键集合与宽松键集合，用于与远端曲目比对。"""
-    strict_keys = set()
-    loose_keys = set()
+def collect_local_track_match_key_counts(folder_path: str) -> tuple[dict, dict]:
+    """每首本地曲目的严格键计数与宽松键计数，用于与远端曲目比对。"""
+    strict_keys = {}
+    loose_keys = {}
     for fname in os.listdir(folder_path):
         path = os.path.join(folder_path, fname)
         if not os.path.isfile(path) or not is_audio_file(path):
@@ -1528,40 +1557,60 @@ def collect_local_track_match_key_sets(folder_path: str) -> tuple[set, set]:
             ks = normalize_track_title_key(candidate)
             kl = normalize_song_name(candidate)
             if ks:
-                strict_keys.add(ks)
+                strict_keys[ks] = strict_keys.get(ks, 0) + 1
             if kl:
-                loose_keys.add(kl)
+                loose_keys[kl] = loose_keys.get(kl, 0) + 1
     return strict_keys, loose_keys
 
 def list_netease_tracks_missing_locally(folder_path: str, track_titles) -> list:
     """根据网易云曲目表，列出本地文件夹中未匹配到的曲名（用于报告）。"""
     if not track_titles:
         return []
-    local_strict, local_loose = collect_local_track_match_key_sets(folder_path)
+    local_strict, local_loose = collect_local_track_match_key_counts(folder_path)
     remote_loose_counts = {}
-    normalized_titles = []
+    remote_title_counts = {}
+    normalized_tracks = []
     for item in track_titles:
         if isinstance(item, dict):
             title = item.get("title", "")
+            duration = item.get("duration", 0)
         else:
             title = item
+            duration = 0
         title = clean_song_name(str(title or ""))
         if not title:
             continue
-        normalized_titles.append(title)
+        strict_key = normalize_track_title_key(title)
+        normalized_tracks.append(
+            {
+                "title": title,
+                "strict_key": strict_key,
+                "duration": normalize_track_duration_seconds(duration),
+            }
+        )
+        if strict_key:
+            remote_title_counts[strict_key] = remote_title_counts.get(strict_key, 0) + 1
         kl = normalize_song_name(title)
         if kl:
             remote_loose_counts[kl] = remote_loose_counts.get(kl, 0) + 1
 
     missing = []
-    for title in normalized_titles:
-        ks = normalize_track_title_key(title)
+    for track in normalized_tracks:
+        title = track["title"]
+        ks = track["strict_key"]
         kl = normalize_song_name(title)
-        if ks and ks in local_strict:
+        if ks and local_strict.get(ks, 0) > 0:
+            local_strict[ks] -= 1
             continue
-        if kl and remote_loose_counts.get(kl, 0) == 1 and kl in local_loose:
+        if kl and remote_loose_counts.get(kl, 0) == 1 and local_loose.get(kl, 0) > 0:
+            local_loose[kl] -= 1
             continue
-        missing.append(title)
+        duration_text = (
+            format_track_duration(track["duration"])
+            if ks and remote_title_counts.get(ks, 0) > 1
+            else ""
+        )
+        missing.append(f"{title} [{duration_text}]" if duration_text else title)
     return missing
 
 
@@ -1779,6 +1828,29 @@ def build_metadata_source_report_line(verification_result) -> str:
         return "数据源：" + "、".join(sources)
     return "数据源：未获取到远端专辑元数据"
 
+def format_missing_titles_for_report(missing_titles, limit=None) -> str:
+    grouped = []
+    index_by_title = {}
+    for raw_title in missing_titles or []:
+        title = str(raw_title or "").strip()
+        if not title:
+            continue
+        if title in index_by_title:
+            grouped[index_by_title[title]][1] += 1
+            continue
+        index_by_title[title] = len(grouped)
+        grouped.append([title, 1])
+
+    visible = grouped if limit is None else grouped[:limit]
+    parts = [
+        title if count == 1 else f"{title} x{count}"
+        for title, count in visible
+    ]
+    if limit is not None and len(grouped) > limit:
+        omitted_count = sum(count for _, count in grouped[limit:])
+        parts.append(f"等{omitted_count}首")
+    return "；".join(parts)
+
 def write_album_mismatch_report(dest_folder: str, artist_name: str, verification_result, log_func=None):
     report_path = get_report_path(artist_name)
     items = verification_result.get("mismatched_items", []) if verification_result else []
@@ -1804,7 +1876,7 @@ def write_album_mismatch_report(dest_folder: str, artist_name: str, verification
                     line += f" | 多出 {item['extra_count']} 首"
                 missing_titles = item.get("missing_titles") or []
                 if missing_titles:
-                    line += " | 缺：" + "；".join(missing_titles)
+                    line += " | 缺：" + format_missing_titles_for_report(missing_titles)
                 lines.append(line)
             lines.append("")
 
@@ -2228,9 +2300,7 @@ class MoveGui:
             )
             missing_titles = item.get("missing_titles") or []
             if missing_titles:
-                display_text += " | 缺：" + "；".join(missing_titles[:8])
-                if len(missing_titles) > 8:
-                    display_text += f"…等{len(missing_titles)}首"
+                display_text += " | 缺：" + format_missing_titles_for_report(missing_titles, limit=8)
             self.mismatch_paths.append(item["folder_path"])
             self.result_listbox.insert(tk.END, display_text)
 
@@ -2308,6 +2378,11 @@ class MoveGui:
         self.root.state("normal")
         self.root.deiconify()
         self.root.lift()
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
         try:
             self.root.focus_force()
         except Exception:
@@ -2506,17 +2581,26 @@ class MoveGui:
 # 主函数
 # -----------------------
 def main():
+    instance = SingleInstance(SINGLE_INSTANCE_APP_ID, SINGLE_INSTANCE_PORT)
+    if not instance.acquire():
+        instance.notify_existing()
+        return
+
     root = tk.Tk()
-    style = ttk.Style(root)
     try:
-        style.theme_use('clam')
-        style.configure("TLabel", font=("Segoe UI", 10))
-        style.configure("TButton", font=("Segoe UI", 10))
-        style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-    except Exception:
-        pass
-    app = MoveGui(root)
-    root.mainloop()
+        style = ttk.Style(root)
+        try:
+            style.theme_use('clam')
+            style.configure("TLabel", font=("Segoe UI", 10))
+            style.configure("TButton", font=("Segoe UI", 10))
+            style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+        except Exception:
+            pass
+        app = MoveGui(root)
+        instance.set_show_callback(lambda: root.after(0, app.show_window))
+        root.mainloop()
+    finally:
+        instance.close()
 
 if __name__ == "__main__":
     main()

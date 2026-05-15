@@ -708,16 +708,25 @@ def extract_qq_song_title(song_item: dict) -> str:
     title = first_value(
         song,
         [
-            "name",
-            "songname",
-            "songName",
             "title",
+            "songName",
+            "songname",
+            "name",
             "songorig",
             "songOrig",
         ],
         "",
     )
-    return base.clean_song_name(str(title or ""))
+    title = base.clean_song_name(str(title or ""))
+    subtitle = base.clean_song_name(
+        str(first_value(song, ["subtitle", "subTitle", "sub_title"], "") or "")
+    )
+    if title and subtitle:
+        title_key = base.normalize_track_title_key(title)
+        subtitle_key = base.normalize_track_title_key(subtitle)
+        if subtitle_key and subtitle_key not in title_key:
+            title = f"{title} ({subtitle})"
+    return title
 
 
 def extract_qq_song_artists(song_item: dict) -> list[dict]:
@@ -804,12 +813,19 @@ def fetch_qq_album_detail(
         title = extract_qq_song_title(song_item)
         if not title:
             continue
+        song = extract_qq_song_object(song_item)
         artists = extract_qq_song_artists(song_item)
         if artists:
             artist_metadata_seen = True
         if not qq_song_has_target_artist(song_item, target_artist_name, target_singer_mid):
             continue
-        ordered_titles.append({"title": title, "track_no": index})
+        ordered_titles.append(
+            {
+                "title": title,
+                "track_no": index,
+                "duration": base.normalize_track_duration_seconds(first_value(song, ["interval", "duration", "dt"], 0)),
+            }
+        )
 
     album_info = data.get("albumInfo") or data.get("album_info") or {}
     publish_date = normalize_qq_publish_date(
@@ -964,7 +980,7 @@ def write_album_mismatch_report(dest_folder: str, artist_name: str, verification
                     line += f" | 多出 {item['extra_count']} 首"
                 missing_titles = item.get("missing_titles") or []
                 if missing_titles:
-                    line += " | 缺：" + "；".join(missing_titles)
+                    line += " | 缺：" + base.format_missing_titles_for_report(missing_titles)
                 lines.append(line)
             lines.append("")
 

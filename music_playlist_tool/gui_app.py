@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from service_manager import MusicApiServiceManager
+from single_instance import SingleInstance
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -43,6 +44,11 @@ def create_tray_image():
 
 APP_DIR = get_app_dir()
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
+NETEASE_COOKIE_PATH = APP_DIR / "netease_cookie.txt"
+QQ_COOKIE_PATH = Path(os.environ.get("QQ_MUSIC_COOKIE_FILE") or (APP_DIR / "qq_music_cookie.txt"))
+SINGLE_INSTANCE_APP_ID = "music-api-playlist"
+SINGLE_INSTANCE_PORT = 49232
+os.environ.setdefault("QQ_MUSIC_COOKIE_FILE", str(QQ_COOKIE_PATH))
 
 
 def resolve_workflow_path():
@@ -324,6 +330,11 @@ class PlaylistGui:
         self.root.deiconify()
         self.root.lift()
         try:
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
             self.root.focus_force()
         except Exception:
             pass
@@ -346,14 +357,17 @@ class PlaylistGui:
         self.root.destroy()
 
     def prompt_cookie(self):
-        dialog = CookieDialog(self.root, initial_value=WORKFLOW.get_netease_cookie())
+        dialog = CookieDialog(
+            self.root,
+            initial_value=WORKFLOW.load_netease_cookie(str(NETEASE_COOKIE_PATH)) or WORKFLOW.get_netease_cookie(),
+        )
         self.root.wait_window(dialog)
         return dialog.result
 
     def prompt_qq_cookie(self):
         dialog = CookieDialog(
             self.root,
-            initial_value=WORKFLOW.get_qq_cookie() or WORKFLOW.load_qq_cookie(),
+            initial_value=WORKFLOW.load_qq_cookie(str(QQ_COOKIE_PATH)) or WORKFLOW.get_qq_cookie(),
             title="更新 QQ Cookie",
             prompt="请输入新的 QQ 音乐 Cookie：",
         )
@@ -361,18 +375,26 @@ class PlaylistGui:
         return dialog.result
 
     def on_update_cookie(self):
-        cookie = self.prompt_cookie()
-        if cookie:
-            WORKFLOW.set_netease_cookie(cookie, persist=True)
-            self.append_log("网易云 Cookie 已更新。")
-            self.status_var.set("Cookie 已更新")
+        try:
+            cookie = self.prompt_cookie()
+            if cookie:
+                WORKFLOW.set_netease_cookie(cookie, persist=True, cookie_path=str(NETEASE_COOKIE_PATH))
+                self.append_log("网易云 Cookie 已更新。")
+                self.status_var.set("Cookie 已更新")
+        except Exception as exc:
+            self.append_log(f"网易云 Cookie 更新失败：{exc}")
+            messagebox.showerror("更新网易云 Cookie 失败", str(exc), parent=getattr(self, "root", None))
 
     def on_update_qq_cookie(self):
-        cookie = self.prompt_qq_cookie()
-        if cookie:
-            WORKFLOW.set_qq_cookie(cookie, persist=True)
-            self.append_log("QQ Cookie 已更新。")
-            self.status_var.set("Cookie 已更新")
+        try:
+            cookie = self.prompt_qq_cookie()
+            if cookie:
+                WORKFLOW.set_qq_cookie(cookie, persist=True, cookie_path=str(QQ_COOKIE_PATH))
+                self.append_log("QQ Cookie 已更新。")
+                self.status_var.set("Cookie 已更新")
+        except Exception as exc:
+            self.append_log(f"QQ Cookie 更新失败：{exc}")
+            messagebox.showerror("更新 QQ Cookie 失败", str(exc), parent=getattr(self, "root", None))
 
     def set_running(self, running):
         state = tk.DISABLED if running else tk.NORMAL
@@ -504,6 +526,11 @@ class PlaylistGui:
 
 
 def main():
+    instance = SingleInstance(SINGLE_INSTANCE_APP_ID, SINGLE_INSTANCE_PORT)
+    if not instance.acquire():
+        instance.notify_existing()
+        return
+
     root = tk.Tk()
     try:
         style = ttk.Style(root)
@@ -513,8 +540,12 @@ def main():
         style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
     except Exception:
         pass
-    PlaylistGui(root)
-    root.mainloop()
+    try:
+        app = PlaylistGui(root)
+        instance.set_show_callback(lambda: root.after(0, app.show_window))
+        root.mainloop()
+    finally:
+        instance.close()
 
 
 if __name__ == "__main__":

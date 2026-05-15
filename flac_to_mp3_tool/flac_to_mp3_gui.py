@@ -31,11 +31,19 @@ from typing import Optional, Dict, Tuple, List, Callable
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from single_instance import SingleInstance
+
 from mutagen.flac import FLAC
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, USLT, ID3NoHeaderError, TDRC
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".wma", ".ape", ".aiff", ".alac"}
+SINGLE_INSTANCE_APP_ID = "music-api-flac-to-mp3"
+SINGLE_INSTANCE_PORT = 49233
 
 
 # -----------------------------
@@ -759,6 +767,20 @@ class App:
                     self._log(f"专辑子目录重命名失败：{exc}")
             self._log(f"完成：共 {self.total_tasks}，失败 {self.fail_tasks}。")
 
+    def show_window(self) -> None:
+        self.root.state("normal")
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def on_close(self) -> None:
         if self.is_converting:
             should_close = messagebox.askyesno(
@@ -779,13 +801,22 @@ class App:
 
 def main() -> None:
     # PyInstaller 友好：用 --noconsole / --windowed 打包即可（脚本本身不弹控制台）
+    instance = SingleInstance(SINGLE_INSTANCE_APP_ID, SINGLE_INSTANCE_PORT)
+    if not instance.acquire():
+        instance.notify_existing()
+        return
+
     root = tk.Tk()
     try:
-        ttk.Style().theme_use("clam")
-    except Exception:
-        pass
-    App(root)
-    root.mainloop()
+        try:
+            ttk.Style().theme_use("clam")
+        except Exception:
+            pass
+        app = App(root)
+        instance.set_show_callback(lambda: root.after(0, app.show_window))
+        root.mainloop()
+    finally:
+        instance.close()
 
 
 if __name__ == "__main__":
