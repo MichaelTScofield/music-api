@@ -431,7 +431,7 @@ def artist_name_matches(target_name, candidate_name):
     candidate = normalize_artist_name(candidate_name)
     if not target or not candidate:
         return False
-    return target == candidate or candidate.startswith(target) or target.startswith(candidate)
+    return target == candidate
 
 
 def first_value(obj, keys, default=None):

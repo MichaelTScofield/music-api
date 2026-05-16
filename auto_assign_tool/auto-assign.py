@@ -692,11 +692,7 @@ def artist_name_matches(target_name: str, candidate_name: str) -> bool:
     candidate = normalize_artist_name(candidate_name)
     if not target or not candidate:
         return False
-    return (
-        target == candidate
-        or candidate.startswith(target)
-        or target.startswith(candidate)
-    )
+    return target == candidate
 
 def track_artist_matches(target_name: str, artist_names) -> bool:
     """曲目演唱人包含目标歌手时才计入该歌手目录；缺少演唱人字段时保守保留。"""

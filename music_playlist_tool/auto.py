@@ -390,7 +390,7 @@ def artist_name_matches(target_name, candidate_name):
     candidate = normalize_artist_name(candidate_name)
     if not target or not candidate:
         return False
-    return target == candidate or candidate.startswith(target) or target.startswith(candidate)
+    return target == candidate
 
 
 def build_title_candidates(title):
@@ -464,6 +464,7 @@ def get_album_songs(album, artist_name):
             {
                 "name": name,
                 "song_id": str(song.get("id") or ""),
+                "source_platform": "netease",
                 "artist": artist_name,
                 "source_artists": artists,
                 "album": album["name"],
@@ -751,7 +752,11 @@ def add_netease_songs(playlist_id, songs):
             log_message(
                 f"网易云匹配进度：{index}/{total_songs}，当前已匹配 {len(matched_song_pairs)} 首，未匹配 {len(missing_songs)} 首"
             )
-        song_id = search_netease_song(song["name"], song["artist"], song["album"])
+        song_id = ""
+        if song.get("source_platform") == "netease":
+            song_id = str(song.get("song_id") or "").strip()
+        if not song_id:
+            song_id = search_netease_song(song["name"], song["artist"], song["album"])
         if song_id:
             matched_song_pairs.append((song, str(song_id)))
         else:
