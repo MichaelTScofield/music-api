@@ -9,6 +9,7 @@ set "DIST_DIR=%TOOL_DIR%dist"
 set "BUILD_DIR=%TOOL_DIR%build"
 set "SPEC_DIR=%BUILD_DIR%\spec"
 set "EXE_PATH=%DIST_DIR%\%APP_NAME%.exe"
+set "RUNTIME_PREPARE_SCRIPT=%PROJECT_ROOT%\music_playlist_tool\prepare_runtime_bundle.bat"
 
 if not exist "%ENTRY%" (
   echo Entry script not found: %ENTRY%
@@ -18,14 +19,25 @@ if not exist "%TOOL_DIR%qq-auto-assign.py" (
   echo QQ helper script not found: %TOOL_DIR%qq-auto-assign.py
   exit /b 1
 )
+if not exist "%RUNTIME_PREPARE_SCRIPT%" (
+  echo Runtime preparation script not found: %RUNTIME_PREPARE_SCRIPT%
+  exit /b 1
+)
 
-echo [1/4] Clean old build output...
+echo [1/5] Prepare runtime bundle...
+call "%RUNTIME_PREPARE_SCRIPT%"
+if errorlevel 1 (
+  echo Runtime preparation failed.
+  exit /b 1
+)
+
+echo [2/5] Clean old build output...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
 if not exist "%DIST_DIR%" mkdir "%DIST_DIR%"
 mkdir "%SPEC_DIR%"
 
-echo [2/4] Build one-file exe...
+echo [3/5] Build one-file exe...
 pyinstaller ^
   --noconfirm ^
   --clean ^
@@ -55,7 +67,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [3/4] Keep only exe artifact...
+echo [4/5] Keep only exe artifact...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 for /f "delims=" %%I in ('dir /b "%DIST_DIR%"') do (
   if /I not "%%I"=="%APP_NAME%.exe" (
@@ -67,6 +79,6 @@ for /f "delims=" %%I in ('dir /b "%DIST_DIR%"') do (
   )
 )
 
-echo [4/4] Done.
+echo [5/5] Done.
 echo Output: %EXE_PATH%
 endlocal
